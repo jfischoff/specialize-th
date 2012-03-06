@@ -1,6 +1,8 @@
-{-# LANGUAGE TupleSections, NoMonomorphismRestriction, TemplateHaskell #-}
+{-# LANGUAGE TupleSections, GeneralizedNewtypeDeriving, 
+    FlexibleInstances, NoMonomorphismRestriction, TemplateHaskell #-}
 module Main where
 import Language.Haskell.TH
+import Language.Haskell.TH.Syntax 
 import Test.Framework (defaultMain, testGroup, defaultMainWithArgs)
 import Test.Framework.Providers.HUnit
 import Test.Framework.Providers.QuickCheck2 (testProperty)
@@ -8,12 +10,15 @@ import Test.QuickCheck
 import Test.HUnit
 import Debug.Trace.Helpers
 import Debug.Trace
-import Language.Haskell.TH.Instances
+--import Language.Haskell.TH.Instances hiding (lift)
 import Test.QuickCheck.Checkers
 import Data.List
 import Data.Generics.Uniplate.Data
 import Control.Applicative ((<$>))
 import Language.Haskell.TH.Specialize
+import TestType
+import Control.Monad.Identity
+
 
 main = defaultMainWithArgs tests ["-a 100", "-o 5"]
 
@@ -28,10 +33,52 @@ tests = [
             ],
             testGroup "rename_dec" [
                 testCase "test_rename_dec_0" test_rename_dec_0 
+            ],
+            testGroup "create_dec_from_type" [
+                testCase "test_create_dec_from_type_0" test_create_dec_from_type_0
+            ],
+            testGroup "expand_and_specialize" [
+                testCase "test_expand_and_specialize_0" test_expand_and_specialize_0,
+                testCase "test_expand_and_specialize_1" test_expand_and_specialize_1
             ]]
 
+ty_vars_empty dec | (length . get_ty_vars) dec == 0 = True
+ty_vars_empty dec | otherwise = False
+
+filter_poly = filter ty_vars_empty
+
+test_expand_and_specialize_1 = show actual @?= show expected where
+    actual   =  $(lift =<< expand_and_specialize ''TestTypeInt ''TestTypeInt)
+    expected =  [DataD [] (mkName "TestType.TestTypeInt") [] 
+                                [NormalC (mkName "TestType.TestTypeInt") 
+                                [(NotStrict,ConT $ mkName "TestType.PolyType_ConT_GHC.Types.Int")]] [],
+                 DataD [] (mkName "TestType.PolyType_ConT_GHC.Types.Int") [] 
+                    [NormalC (mkName "TestType.PolyType") [(NotStrict,ConT (mkName "GHC.Types.Int"))]] []]
+
+
+test_expand_and_specialize_0 = show actual @?= show expected where
+    actual   = sort $(lift =<< expand_and_specialize ''TestType ''TestType) :: [Dec]
+    expected = [] :: [Dec]
+ 
+
+test_create_dec_from_type_0 = actual @?= (Right expected_typ, expected_decs) where
+    actual        = runIdentity $ run_state' (create_dec_from_type mk_new_dec_name id_constr_renamer initial) 
+                         built_in_decs
+    expected_decs = [DataD [] (mkName "ConT_Int_List") [] [NormalC (mkName "GHC.Types.[]") [],
+        InfixC (NotStrict,ConT $ mkName "Int") (mkName "GHC.Types.:") 
+            (NotStrict,AppT ListT (ConT $ mkName "Int"))] [],
+        DataD [] (mkName "GHC.Types.[]") [PlainTV $ mkName "a"] 
+                [NormalC (mkName "GHC.Types.[]") [],
+        InfixC (NotStrict,VarT $ mkName "a") (mkName "GHC.Types.:") 
+            (NotStrict,AppT ListT (VarT $ mkName "a"))] []]
+    expected_typ  = ConT $ mkName "ConT_Int_List"
+    initial       = AppT ListT (ConT $ mkName "Int")
+    built_in_decs = [DataD [] (mkName "GHC.Types.[]") [PlainTV $ mkName "a"] 
+        [NormalC (mkName "GHC.Types.[]") [], InfixC (NotStrict,VarT $ mkName "a") 
+        (mkName "GHC.Types.:") (NotStrict,AppT ListT (VarT $ mkName "a"))] []]
+
 test_find_con_0 = actual @?= expected where
-    actual           = find_con initial_con_name initial
+    actual           = find_con (ConstructorName initial_con_name) initial
     expected         = Right initial_con
     initial          = DataD [] (mkName "Dec_Name") [] [initial_con] []
     initial_con      = NormalC initial_con_name []
@@ -44,23 +91,24 @@ test_get_con_vars_0 = actual @?= expected where
          
 sub_dec_and_rename_0 = actual @?= Right expected where
     actual              = sub_dec_and_rename id_constr_renamer 
-                            initial_dec initial_con_name types
-    expected            = DataD [] expected_name (map (PlainTV . mkName) ["a"])
-                            [expected_con, initial_con_1] []
+                            initial_dec types
+    expected            = DataD [] expected_name []
+                            [expected_con_0, expected_con_1] []
     expected_name       = mkName $ initial_name_string ++ "_" ++ concat_type_names types
-    expected_con        = NormalC (mkName "Test") $ map (NotStrict,) $ [ConT $ mkName "Test"] 
-                                ++ types
-    types               = [ConT $ mkName "test", ConT $ mkName "thing"]
+    expected_con_0      = NormalC (mkName "Test_0") $ map (NotStrict,) $ [ConT $ mkName "Test_0"] 
+                                ++ [ConT $ mkName "thing", ConT $ mkName "hello"]
+    expected_con_1      = NormalC (mkName "Test_1") $ map (NotStrict,) $ [ConT $ mkName "Test_1"] 
+                            ++ [ConT $ mkName "test", ConT $ mkName "test"]
+    types               = [ConT $ mkName "test", ConT $ mkName "thing", ConT $ mkName "hello"]
     initial_name_string = "Dec_name"
     initial_name        = mkName initial_name_string
     initial_dec         = DataD [] initial_name (map (PlainTV . mkName) ["a", "b", "c"]) 
                             [initial_con_0, initial_con_1] []
-    initial_con_0       = NormalC initial_con_name $ map (NotStrict,) $ 
-                            [ConT $ mkName "Test", VarT $ mkName "b", VarT $ mkName "c"]
-    initial_con_1       = NormalC initial_con_name $ map (NotStrict,) $ 
-                             [ConT $ mkName "Test", VarT $ mkName "a", VarT $ mkName "a"]
+    initial_con_0       = NormalC (mkName "Test_0") $ map (NotStrict,) $ 
+                            [ConT $ mkName "Test_0", VarT $ mkName "b", VarT $ mkName "c"]
+    initial_con_1       = NormalC (mkName "Test_1") $ map (NotStrict,) $ 
+                             [ConT $ mkName "Test_1", VarT $ mkName "a", VarT $ mkName "a"]
 
-    initial_con_name    = mkName "Test"
     
 
 test_concat_type_names_0 = actual @?= expected where
