@@ -1,9 +1,9 @@
-{-# LANGUAGE FlexibleContexts, MultiParamTypeClasses, FlexibleInstances, GeneralizedNewtypeDeriving,
- TemplateHaskell #-}
+{-# LANGUAGE FlexibleContexts, MultiParamTypeClasses, FlexibleInstances, GeneralizedNewtypeDeriving #-}
 module Language.Haskell.TH.Specialize 
 (
 -- ** Main Interface
 expand_and_specialize,
+expand_and_specialize_syns,
  expand_and_specialize',
 -- *** Helper Types
  ConstructorName (..),
@@ -33,6 +33,7 @@ import Language.Haskell.TH.Universe
 import Language.Haskell.TH.TypeSub
 import Control.Monad.Error
 import Control.Monad.State
+import Control.Monad.Reader
 import Data.Generics.Uniplate.Data
 import Data.List
 import Control.Applicative
@@ -45,7 +46,8 @@ import Data.Composition
 import Data.List
 
 
-
+type Maker = (ConstrRenamer -> Dec -> [Type] -> Result Dec)
+type Config = ([Dec], Maker)
 
 -- | Expand all the type syn's and create specialize types for any polymorphic types.
 --   All of the new specialized declarations are returned, along with the original dec 
@@ -54,7 +56,10 @@ import Data.List
 --   The second Name, is the new name for the Dec.
 --   use mk_new_dec_name for the Dec renaming and id_constr_renamer for the constructor renaming.
 expand_and_specialize :: Name -> Name -> Q [Dec]
-expand_and_specialize = expand_and_specialize' mk_new_dec_name id_constr_renamer
+expand_and_specialize = expand_and_specialize' sub_dec_and_rename mk_new_dec_name id_constr_renamer
+
+expand_and_specialize_syns :: Name -> Name -> Q [Dec]
+expand_and_specialize_syns = expand_and_specialize' sub_dec_and_rename_as_syn mk_new_dec_name id_constr_renamer
 
 -- | Expand all the type syn's and create specialize types for any polymorphic types.
 --   All of the new specialized declarations are returned, along with the original dec 
@@ -62,24 +67,32 @@ expand_and_specialize = expand_and_specialize' mk_new_dec_name id_constr_renamer
 --   The first Name is the name of the Dec to create specialize instances for.
 --   The second Name, is the new name for the Dec.
 --   The DecRenamer and ConstrRenamer are used to rename Dec's and Con's respectively.
-expand_and_specialize' :: DecRenamer -> ConstrRenamer -> Name -> Name -> Q [Dec]
-expand_and_specialize' dr cr name new_name = do
-    universe <- map snd <$> get_universe name
+expand_and_specialize' :: Maker -> DecRenamer -> ConstrRenamer -> Name -> Name -> Q [Dec]
+expand_and_specialize' maker dr cr name new_name = do
+    universe <- (map snd) <$> (get_universe name)
     decs <- expand_type_syn_decs universe
     
-    (new_dec, new_decs) <- run_state' (create_decs_from_name dr cr (TypeName name)) decs
+    (new_dec, new_decs) <- run_state' (create_decs_from_name dr cr (TypeName name)) 
+                            ((nub $ universe ++ decs), maker)
+    when((not . is_right) new_dec) $ do error (show new_dec)
     
-    let result = case new_dec of
-                Right x -> (from_right $ set_dec_name (pack new_name) x):new_decs
-                Left  _ -> new_decs
+    (new_dec', new_decs') <- run_state' (create_decs_from_name dr cr =<< (throw_either $
+                                get_dec_name (from_right new_dec))) 
+                                (nub $ new_decs ++ universe ++ decs, maker)
     
-    return $ (nub result) \\ decs
+    
+    let result = case new_dec' of
+                Right x -> (from_right $ set_dec_name (pack new_name) x):(new_decs' ++ new_decs)
+                Left  msg -> error msg -- new_decs
+    
+    return $ result
     
 expand_type_syn_decs :: [Dec] -> Q [Dec]
 expand_type_syn_decs decs = mapM expand_type_syn_dec decs
 
 expand_type_syn_dec :: Dec -> Q Dec
-expand_type_syn_dec dec = (from_right . (flip set_cons) dec) <$> (mapM expand_type_syn_con $ get_cons dec)
+expand_type_syn_dec dec = (from_right . (flip set_cons) dec) <$> 
+                                (mapM expand_type_syn_con $ get_cons dec)
 
 expand_type_syn_con :: Con -> Q Con
 expand_type_syn_con con = set_con_types' con <$> (mapM expand_type_syn_type $ 
@@ -89,12 +102,12 @@ expand_type_syn_type :: Type -> Q Type
 expand_type_syn_type = expandSyns
 
 find_dec :: [Dec] -> TypeName -> Result Dec
-find_dec decs name = maybe_to_either "could not find dec" $ find (is_dec_name name) decs
+find_dec decs name = maybe_to_either ("could not find dec " ++ (show . unpack) name ++ " in " ++ show decs) $ find (is_dec_name name) decs
 
 is_dec_name name dec = result where
     dec_name_result = get_dec_name dec
     result = case dec_name_result of 
-                Right x -> x == name
+                Right x -> show x == show name
                 Left _  -> False
 
 find_dec_from_constr :: (Monad m, Functor m, MonadError String m) => [Dec] -> ConstructorName -> m Dec
@@ -108,37 +121,88 @@ has_constr name dec = result where
                 Just _ -> True
                 Nothing  -> False
 
-create_decs_from_name :: (Functor m, Monad m, MonadState [Dec] m, MonadError String m) => 
+get_all_decs :: (Monad m, MonadState [Dec] m, MonadReader Config m) =>  m [Dec]
+get_all_decs = do
+    decs <- get
+    other_decs <- asks fst
+    return $ decs ++ other_decs
+
+create_decs_from_name :: (Functor m, Monad m, MonadState [Dec] m, MonadError String m, 
+    MonadReader Config m) => 
     DecRenamer -> ConstrRenamer -> TypeName -> m Dec
 create_decs_from_name dr cr name = do
-    decs <- get
+    decs <- get_all_decs
     dec <- throw_either $ find_dec decs name
     create_decs_from_dec dr cr dec
 
-create_decs_from_dec :: (Functor m, Monad m, MonadState [Dec] m, MonadError String m) => 
+create_decs_from_dec :: (Functor m, Monad m, MonadState [Dec] m, MonadReader Config m,
+    MonadError String m) => 
     DecRenamer -> ConstrRenamer -> Dec -> m Dec 
 create_decs_from_dec dr cr dec = (from_right . (flip set_cons) dec) <$> 
     (mapM (create_decs_from_con dr cr) $ get_cons dec)
             
-create_decs_from_con :: (Functor m, Monad m, MonadState [Dec] m, MonadError String m) => 
+create_decs_from_con :: (Functor m, Monad m, MonadState [Dec] m, MonadReader Config m,
+    MonadError String m) => 
     DecRenamer -> ConstrRenamer -> Con -> m Con 
 create_decs_from_con dr cr con = set_con_types' con <$> (mapM (create_dec_from_type dr cr) $ 
                                     get_con_types con)
     
-create_dec_from_type :: (Functor m, Monad m, MonadState [Dec] m, MonadError String m) => 
+create_dec_from_type :: (Functor m, Monad m, MonadState [Dec] m, MonadReader Config m, MonadError String m) => 
     DecRenamer -> ConstrRenamer -> Type -> m Type
 create_dec_from_type dr cr typ@(AppT _ _) = do 
     let x:args = collect_type_args typ
-    create_dec_from_type' dr cr x =<< (mapM (create_dec_from_type dr cr) args)
+    (create_dec_from_type' dr cr x =<< (mapM (create_dec_from_type dr cr) args))
+create_dec_from_type dr cr t@(ConT x) = do 
+    found <- is_ty_syn $ TypeName x -- move this
+    if found
+        then create_dec_from_type dr cr =<< (get_typ_syn_type $ TypeName x)
+        else return t
 create_dec_from_type dr cr typ = return typ
+
+is_ty_syn :: (Functor m, Monad m, MonadState [Dec] m, MonadReader Config m, MonadError String m) =>  
+    TypeName -> m Bool
+is_ty_syn name = do 
+    decs <- get_all_decs
+    let found_result = find_dec decs name
+    case found_result of 
+        Right x -> return $ is_ty_syn' x 
+        _ ->       return False
+    
+is_ty_syn' (TySynD _ _ _) = True
+is_ty_syn' _ = False
+
+ty_syn_type (TySynD _ _ t ) = Right t
+ty_syn_type x = Left $ show x ++ "is not a TySynD in ty_syn_types"
+
+get_typ_syn_type name = do
+    decs <- get_all_decs
+    dec <- throw_either $ find_dec decs name
+    throw_either $ ty_syn_type dec
+
 
 type DecRenamer    = ([Type] -> TypeName -> Result TypeName)
 type ConstrRenamer = ([Type] -> Con -> Con)
 
-has_dec :: (Monad m, MonadState [Dec] m) => TypeName -> m Bool
-has_dec name = gets (any (is_dec_name name))
+has_dec :: (Monad m, MonadState [Dec] m, MonadReader Config m, Functor m) => TypeName -> m Bool
+has_dec name = (any (is_dec_name name)) <$> get_all_decs 
 
-add_dec dec = modify (dec:) 
+add_dec :: (Monad m, MonadState [Dec] m, Functor m, MonadReader Config m,
+                              MonadError String m) => Dec -> m Int
+add_dec dec = do 
+    modify (dec:) 
+    gets ((+(-1)) . length)
+ 
+set_dec_at_index :: (Monad m, MonadState [Dec] m, Functor m, MonadReader Config m,
+                              MonadError String m) => Int -> Dec -> m ()
+set_dec_at_index index x = do
+    xs <- get
+    
+    let (start, end) = splitAt (index - 1) xs
+    
+    
+    put(start ++ [x] ++ (tail end))
+
+default_dec name = DataD [] name [] [] []
 
 -- | Default Con renamer
 id_constr_renamer :: [Type] -> Con -> Con
@@ -149,22 +213,40 @@ newtype ConstructorName = ConstructorName { runConstructorName :: Name }
 newtype TypeName = TypeName { runTypeName :: Name }
     deriving(Show, Eq)
 
-create_dec_from_type' :: (Monad m, MonadState [Dec] m, Functor m,
+instance Newtype ConstructorName Name where
+    pack x = ConstructorName x
+    unpack (ConstructorName x) = x
+
+instance Newtype TypeName Name where
+    pack x = TypeName x
+    unpack (TypeName x) = x
+
+--sub_dec_and_rename
+
+create_dec_from_type' :: (Monad m, MonadState [Dec] m, Functor m, MonadReader Config m,
                           MonadError String m) => 
                           DecRenamer -> ConstrRenamer -> Type -> [Type] -> m Type
 create_dec_from_type' dr cr (ConT name) args = do
-        decs          <- get     
+        decs          <- get_all_decs     
         dec           <- throw_either $ find_dec decs $ TypeName name
         dec_name      <- throw_either $ get_dec_name dec 
         new_dec_name  <- throw_either $ dr args dec_name
         has_dec'      <- has_dec new_dec_name
+        maker         <- asks snd
         when (not has_dec') $ do 
-            new_dec <- sub_dec_and_rename cr dec args
-            add_dec new_dec 
+            index <- add_dec (default_dec $ unpack new_dec_name)
+            new_dec <- (fix_list new_dec_name =<< (throw_either $ maker cr dec args))
+            set_dec_at_index index new_dec
+
+            _ <- create_decs_from_dec dr cr new_dec 
+            return ()
 
         return $ ConT $ runTypeName new_dec_name
-create_dec_from_type' dr cr ListT args                 = 
-    create_dec_from_type' dr cr (ConT $ mkName "GHC.Types.[]") args 
+create_dec_from_type' dr cr ListT args = do
+    let dec_name = TypeName $ mkName "GHC.Types.[]"
+    new_dec_name  <- throw_either $ dr args dec_name
+
+    create_dec_from_type' dr cr (ConT $ runTypeName dec_name) args
 create_dec_from_type' dr cr (TupleT count) args        = 
     create_dec_from_type' dr cr (ConT $ mkName ("GHC.Types.(" ++ 
         (concat $ take count (cycle [","])) ++ ")")) args
@@ -181,6 +263,14 @@ create_dec_from_type' dr cr t args =
     --just return what was passed in if we can't do anything
     return $ foldl' AppT t args 
 
+fix_list dec_name dec = throw_either . (flip set_cons) dec . map (fix_list_con dec_name) $ get_cons dec
+
+fix_list_con n con = set_con_types' con .
+    map (fix_list_con_types n)  $ get_con_types con
+
+fix_list_con_types n (AppT (ListT) _) = ConT $ runTypeName n
+fix_list_con_types _ x = x
+
 rename_cons :: (Con -> Con) -> Dec -> Result Dec
 rename_cons cr dec = result where
     new_cons = map cr $ get_cons dec
@@ -193,6 +283,7 @@ set_cons cons (DataD x y z _ w)            = Right $ DataD x y z cons w
 set_cons cons (DataInstD x y z _ w)        = Right $ DataInstD x y z cons w
 set_cons (con:[]) (NewtypeInstD x y z _ w) = Right $ NewtypeInstD x y z con w
 set_cons cons (NewtypeInstD x y z _ w)     = Left $ show cons ++ " is not a appropiate arg for setting the NewtypeInstD's constructor arg"
+set_cons [] x                              = Right x
 set_cons _ x                               = Left $ "Can't set the constructors for " ++ show x
 
 get_ty_vars :: Dec -> [TyVarBndr]
@@ -207,8 +298,7 @@ ty_var_name :: TyVarBndr -> Name
 ty_var_name (KindedTV name _ ) = name
 ty_var_name (PlainTV name) = name
 
-sub_dec_by_con :: (Monad m, MonadError String m) => 
-    ConstrRenamer -> Dec -> [Type] -> m Dec
+sub_dec_by_con :: ConstrRenamer -> Dec -> [Type] -> Result Dec
 sub_dec_by_con cr dec args = do
     --get the names of the ty vars
     let tv_vars = get_ty_vars dec
@@ -216,9 +306,14 @@ sub_dec_by_con cr dec args = do
     throw_either $ rename_cons (cr args) $ foldl' sub_type_dec' dec $ zip args $ 
         map (VarT . ty_var_name) tv_vars
     
-sub_dec_and_rename :: (Monad m, Functor m, MonadError String m) => 
-    ConstrRenamer -> Dec -> [Type] -> m Dec   
-sub_dec_and_rename cr dec types = rename_dec types =<< sub_dec_by_con cr dec types
+sub_dec_and_rename :: ConstrRenamer -> Dec -> [Type] -> Result Dec   
+sub_dec_and_rename cr dec types =  rename_dec types =<< sub_dec_by_con cr dec types
+
+sub_dec_and_rename_as_syn :: ConstrRenamer -> Dec -> [Type] -> Result Dec   
+sub_dec_and_rename_as_syn cr dec types = do 
+     name <- get_dec_name dec
+     new_name <- mk_new_dec_name types name 
+     return $ TySynD (runTypeName new_name) [] $ foldl' AppT (ConT $ runTypeName name) types
 
 concat_type_names :: [Type] -> String
 concat_type_names types = concat $ intersperse "_" $ map (replace " " "_" . show) types 
@@ -231,19 +326,21 @@ mk_new_dec_name types dec_name = do
     let name_string = if isSuffixOf "[]" dec_name_string
                         then suffix ++ "_List"
                         else dec_name_string ++ "_" ++ suffix
+    let sanitize name = replace "." "_" name
  
-    return $ pack $ mkName $ name_string
+    return $ pack $ mkName $ sanitize $ name_string
+    
     
 
-rename_dec :: (Monad m, MonadError String m) => [Type] -> Dec -> m Dec
+rename_dec :: [Type] -> Dec -> Result Dec
 rename_dec types dec = do
     new_name <- (throw_either . mk_new_dec_name types) =<< (throw_either $ get_dec_name dec)
     set_dec_name new_name dec
 
 sub_type_dec' dec (new, old) = sub_type_dec new old dec
 
-find_con :: (Monad m, MonadError String m) => ConstructorName -> Dec -> m Con
-find_con name dec = throw_maybe err_msg $ find (\x -> name == get_con_name x) $ get_cons dec where
+find_con :: ConstructorName -> Dec -> Result Con
+find_con name dec = maybe_to_either err_msg $ find (\x -> name == get_con_name x) $ get_cons dec where
     err_msg = "constructor " ++ show name ++ "not found"
     
 throw_maybe :: (Monad m, MonadError String m) => String -> Maybe a -> m a
@@ -274,28 +371,31 @@ collect_type_args :: Type -> [Type]
 collect_type_args (AppT x y) = x:(collect_type_args y)
 collect_type_args x          = [x]
 
-run_state' x xs = runStateT (runErrorT (runErrorStateT x)) xs
 
-type ErrorStateType m e s a = ErrorT e (StateT s m) a
+run_state' x xs = runReaderT (runStateT (runErrorT (runErrorStateT x)) []) xs
 
-newtype ErrorStateT e s m a = ErrorStateT { runErrorStateT :: ErrorStateType m e s a }
-    deriving (Monad, MonadState s, MonadError e, Functor, MonadPlus)
+run_state'' x xs ys = runReaderT (runStateT (runErrorT (runErrorStateT x)) ys) xs
+
+type ErrorStateType m e s r a = ErrorT e (StateT s (ReaderT r m)) a
+
+newtype ErrorStateT e s r m a = ErrorStateT { runErrorStateT :: ErrorStateType m e s r a }
+    deriving (Monad, MonadState s, MonadError e, Functor, MonadPlus, MonadReader r)
     
-instance MonadTrans (ErrorStateT String [Dec]) where
-    lift = ErrorStateT . lift . lift
+instance MonadTrans (ErrorStateT String Universe Config) where
+    lift = ErrorStateT . lift . lift . lift
 
 collect_constr :: [Dec] -> [(TypeName, [Con])]
 collect_constr decs = right_only $ map get_cons_pair decs
 
-is_right :: Either a b -> Bool
+is_right :: Either String b -> Bool
 is_right (Right _) = True
 is_right (Left _)  = False
 
-from_right :: Either a b -> b
+from_right :: Either String b -> b
 from_right (Right x) = x
-from_right (Left _)  = error "from_right"
+from_right (Left msg)  = error msg
 
-right_only :: [Either a b] -> [b]
+right_only :: [Either String b] -> [b]
 right_only = map from_right . filter is_right
 
 --get_cons_pair :: (Monad m, MonadError String m) => Dec -> m (Name, [Con])
@@ -340,7 +440,7 @@ set_con_types' (RecC n st)       types = RecC n $ zipWith (\(x, y, _) t -> (x,y,
 set_con_types' (InfixC (x, _) n (y, _))  [a, b] = InfixC (x, a) n (y, b)
 set_con_types' (ForallC x y con) types = ForallC x y $ set_con_types' con types
 
-$(mkNewTypes [''ConstructorName, ''TypeName])
+
 
 
 

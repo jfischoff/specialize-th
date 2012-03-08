@@ -8,13 +8,13 @@ import Data.Version (Version(..))
 import System.Environment (getEnv)
 
 version :: Version
-version = Version {versionBranch = [0,0,0,1], versionTags = []}
+version = Version {versionBranch = [0,0,0,8], versionTags = []}
 
 bindir, libdir, datadir, libexecdir :: FilePath
 
 bindir     = "/Users/hi5networks/.cabal/bin"
-libdir     = "/Users/hi5networks/.cabal/lib/specialize-th-0.0.0.1/ghc-7.2.2"
-datadir    = "/Users/hi5networks/.cabal/share/specialize-th-0.0.0.1"
+libdir     = "/Users/hi5networks/.cabal/lib/specialize-th-0.0.0.8/ghc-7.2.2"
+datadir    = "/Users/hi5networks/.cabal/share/specialize-th-0.0.0.8"
 libexecdir = "/Users/hi5networks/.cabal/libexec"
 
 getBinDir, getLibDir, getDataDir, getLibexecDir :: IO FilePath

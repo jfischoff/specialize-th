@@ -1,6 +1,7 @@
-{-# LANGUAGE TupleSections, GeneralizedNewtypeDeriving, 
+{-# LANGUAGE TupleSections, GeneralizedNewtypeDeriving,
     FlexibleInstances, NoMonomorphismRestriction, TemplateHaskell #-}
 module Main where
+import Language.Haskell.TH.Specialize
 import Language.Haskell.TH
 import Language.Haskell.TH.Syntax 
 import Test.Framework (defaultMain, testGroup, defaultMainWithArgs)
@@ -10,15 +11,15 @@ import Test.QuickCheck
 import Test.HUnit
 import Debug.Trace.Helpers
 import Debug.Trace
---import Language.Haskell.TH.Instances hiding (lift)
+
 import Test.QuickCheck.Checkers
 import Data.List
 import Data.Generics.Uniplate.Data
 import Control.Applicative ((<$>))
-import Language.Haskell.TH.Specialize
+
 import TestType
 import Control.Monad.Identity
-
+-- import Language.Haskell.TH.LiftInstances
 
 main = defaultMainWithArgs tests ["-a 100", "-o 5"]
 
@@ -39,7 +40,8 @@ tests = [
             ],
             testGroup "expand_and_specialize" [
                 testCase "test_expand_and_specialize_0" test_expand_and_specialize_0,
-                testCase "test_expand_and_specialize_1" test_expand_and_specialize_1
+                testCase "test_expand_and_specialize_1" test_expand_and_specialize_1,
+                testCase "test_expand_and_specialize_2" test_expand_and_specialize_2
             ]]
 
 ty_vars_empty dec | (length . get_ty_vars) dec == 0 = True
@@ -47,30 +49,39 @@ ty_vars_empty dec | otherwise = False
 
 filter_poly = filter ty_vars_empty
 
+test_expand_and_specialize_2 = show actual @?= show expected where
+    actual = $(lift =<< expand_and_specialize ''ListLike ''ListLike) :: [Dec]
+    expected = [DataD [] 
+        (mkName "TestType.ListLike") [] 
+        [RecC (mkName "TestType.ListLike")
+            [((mkName "TestType.values"), NotStrict,
+                ConT $ mkName "ConT_GHC_Types_Int_List")]] [],
+            DataD [] 
+                (mkName "ConT_GHC_Types_Int_List") [] 
+                [NormalC (mkName "GHC.Types.[]") [],
+                 InfixC (NotStrict,ConT $ mkName "GHC.Types.Int") (mkName "GHC.Types.:")
+                        (NotStrict, ConT $ mkName "ConT_GHC_Types_Int_List")] []]
+
 test_expand_and_specialize_1 = show actual @?= show expected where
-    actual   =  $(lift =<< expand_and_specialize ''TestTypeInt ''TestTypeInt)
+    actual   =  $(lift =<< expand_and_specialize ''TestTypeInt ''TestTypeInt) :: [Dec]
     expected =  [DataD [] (mkName "TestType.TestTypeInt") [] 
                                 [NormalC (mkName "TestType.TestTypeInt") 
-                                [(NotStrict,ConT $ mkName "TestType.PolyType_ConT_GHC.Types.Int")]] [],
-                 DataD [] (mkName "TestType.PolyType_ConT_GHC.Types.Int") [] 
+                                [(NotStrict,ConT $ mkName "TestType_PolyType_ConT_GHC_Types_Int")]] [],
+                 DataD [] (mkName "TestType_PolyType_ConT_GHC_Types_Int") [] 
                     [NormalC (mkName "TestType.PolyType") [(NotStrict,ConT (mkName "GHC.Types.Int"))]] []]
 
 
 test_expand_and_specialize_0 = show actual @?= show expected where
     actual   = sort $(lift =<< expand_and_specialize ''TestType ''TestType) :: [Dec]
-    expected = [] :: [Dec]
+    expected = [$(lift =<< (\(TyConI x) -> return x) =<< reify ''TestType)] :: [Dec]
  
 
 test_create_dec_from_type_0 = actual @?= (Right expected_typ, expected_decs) where
     actual        = runIdentity $ run_state' (create_dec_from_type mk_new_dec_name id_constr_renamer initial) 
-                         built_in_decs
+                         (built_in_decs, sub_dec_and_rename)
     expected_decs = [DataD [] (mkName "ConT_Int_List") [] [NormalC (mkName "GHC.Types.[]") [],
         InfixC (NotStrict,ConT $ mkName "Int") (mkName "GHC.Types.:") 
-            (NotStrict,AppT ListT (ConT $ mkName "Int"))] [],
-        DataD [] (mkName "GHC.Types.[]") [PlainTV $ mkName "a"] 
-                [NormalC (mkName "GHC.Types.[]") [],
-        InfixC (NotStrict,VarT $ mkName "a") (mkName "GHC.Types.:") 
-            (NotStrict,AppT ListT (VarT $ mkName "a"))] []]
+            (NotStrict, ConT $ mkName "ConT_Int_List")] []]
     expected_typ  = ConT $ mkName "ConT_Int_List"
     initial       = AppT ListT (ConT $ mkName "Int")
     built_in_decs = [DataD [] (mkName "GHC.Types.[]") [PlainTV $ mkName "a"] 

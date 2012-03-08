@@ -63,8 +63,15 @@
   (major1) == 0 && (major2) <  3 || \
   (major1) == 0 && (major2) == 3 && (minor) <= 0)
 
-/* package type-sub-th-0.1.0.5 */
-#define VERSION_type_sub_th "0.1.0.5"
+/* package tuple-0.2.0.1 */
+#define VERSION_tuple "0.2.0.1"
+#define MIN_VERSION_tuple(major1,major2,minor) (\
+  (major1) <  0 || \
+  (major1) == 0 && (major2) <  2 || \
+  (major1) == 0 && (major2) == 2 && (minor) <= 0)
+
+/* package type-sub-th-0.1.0.6 */
+#define VERSION_type_sub_th "0.1.0.6"
 #define MIN_VERSION_type_sub_th(major1,major2,minor) (\
   (major1) <  0 || \
   (major1) == 0 && (major2) <  1 || \
@@ -77,8 +84,8 @@
   (major1) == 1 && (major2) <  6 || \
   (major1) == 1 && (major2) == 6 && (minor) <= 5)
 
-/* package universe-th-0.0.0.2 */
-#define VERSION_universe_th "0.0.0.2"
+/* package universe-th-0.0.0.6 */
+#define VERSION_universe_th "0.0.0.6"
 #define MIN_VERSION_universe_th(major1,major2,minor) (\
   (major1) <  0 || \
   (major1) == 0 && (major2) <  0 || \

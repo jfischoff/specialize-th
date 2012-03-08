@@ -7,13 +7,13 @@ Name:                specialize-th
 -- The package version. See the Haskell package versioning policy
 -- (http://www.haskell.org/haskellwiki/Package_versioning_policy) for
 -- standards guiding when and how versions should be incremented.
-Version:             0.0.0.1
+Version:             0.0.0.8
 
 -- A short (one-line) description of the package.
 Synopsis:            Create specialized types from polymorphic ones using TH
 
 -- A longer description of the package.
-Description: Very Alpha. Minimal Testing. Will test more this week.     
+Description: Very Alpha. Minimal Testing.     
 
 -- URL for the project homepage or repository.
 Homepage:            https://github.com/jfischoff/specialize-th
@@ -63,7 +63,8 @@ Library
                  MissingH >= 1.1.1.0,
                  uniplate >= 1.6.5,
                  type-sub-th >= 0.1.0.5,
-                 universe-th >= 0.0.0.2
+                 universe-th >= 0.0.0.6,
+                 tuple >= 0.2.0.1
   ghc-options:            -Wall
   
 Test-Suite tests
